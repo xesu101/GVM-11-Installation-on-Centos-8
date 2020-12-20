@@ -1,0 +1,362 @@
+#Setup Python 3 (AS ROOT):
+yum install -y python3
+alternatives --config python
+Select 2 for default as python
+
+#Enable EPEL Repository (AS ROOT):
+yum install -y epel-release
+
+#Enable Centos-Powertools Repository (AS ROOT):
+yum config-manager --set-enabled powertools
+
+#Install Centos Development Tools (AS ROOT):
+yum groupinstall -y "development tools"
+
+#Install Required Centos Packages (AS ROOT):
+yum install -y wget cmake glib2-devel zlib-devel gnutls-devel libuuid-devel libssh-devel libxml2-devel libgcrypt-devel openldap-devel popt-devel redis libical-devel openssl-devel hiredis-devel radcli-devel gpgme-devel libksba-devel doxygen libpcap-devel nodejs python3-polib libmicrohttpd-devel gnutls-utils python3-devel libpq-devel texinfo xmltoman nmap sshpass socat mingw32-gcc ncurses-devel
+
+#Install Postgres Database Server (AS ROOT):
+yum install -y postgresql-server postgresql-contrib postgresql-server-devel
+/usr/bin/postgresql-setup --initdb
+systemctl enable postgresql
+systemctl start postgresql
+
+#Configure postgres database (AS ROOT):
+sudo -Hiu postgres
+createuser gvm
+createdb -O gvm gvmd
+psql gvmd
+create role dba with superuser noinherit;
+grant dba to gvm;
+create extension "uuid-ossp";
+create extension "pgcrypto";
+\q
+exit
+
+systemctl restart postgresql
+
+#Add GVM Libraries to Systemwide Setup (AS ROOT):
+echo "/opt/gvm/lib" > /etc/ld.so.conf.d/gvm.conf
+ldconfig
+
+#Add Non-Privileged GVM User (AS ROOT):
+useradd -r -d /opt/gvm -c "GVM (OpenVAS) User" -s /bin/bash gvm
+mkdir /opt/gvm
+mkdir /opt/gvm/src
+chown -R gvm:gvm /opt/gvm
+
+#Add GVM Path to Environment (AS ROOT):
+nano /etc/environment
+
+Paste to File:
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/opt/gvm/bin:/opt/gvm/sbin"
+
+#Download The GVM Packages (AS GVM):
+cd /opt/gvm/src
+wget -O gvm-libs-11.0.1.tar.gz https://github.com/greenbone/gvm-libs/archive/v11.0.1.tar.gz
+wget -O openvas-7.0.1.tar.gz https://github.com/greenbone/openvas/archive/v7.0.1.tar.gz
+wget -O ospd-2.0.1.tar.gz https://github.com/greenbone/ospd/archive/v2.0.1.tar.gz
+wget -O ospd-openvas-1.0.1.tar.gz https://github.com/greenbone/ospd-openvas/archive/v1.0.1.tar.gz
+wget -O gvmd-9.0.1.tar.gz https://github.com/greenbone/gvmd/archive/v9.0.1.tar.gz
+wget -O gsa-9.0.1.tar.gz https://github.com/greenbone/gsa/archive/v9.0.1.tar.gz
+wget -O openvas-smb-1.0.5.tar.gz https://github.com/greenbone/openvas-smb/archive/v1.0.5.tar.gz
+
+#Decompress The Source Files (AS GVM):
+cd /opt/gvm/src
+tar xvfz gvm-libs-11.0.1.tar.gz
+tar xvfz openvas-7.0.1.tar.gz 
+tar xvfz ospd-2.0.1.tar.gz
+tar xvfz ospd-openvas-1.0.1.tar.gz
+tar xvfz gvmd-9.0.1.tar.gz
+tar xvfz gsa-9.0.1.tar.gz
+tar xvfz openvas-smb-1.0.5.tar.gz
+
+#Build gvm-libs (AS GVM):
+cd /opt/gvm/src
+export PKG_CONFIG_PATH=/opt/gvm/lib/pkgconfig
+cd gvm-libs-11.0.1
+mkdir build
+cd build
+cmake .. -DCMAKE_INSTALL_PREFIX=/opt/gvm
+make
+make doc
+make install
+
+#Install Heimdal for openvas-smb (AS ROOT):
+cd /usr/local/src
+wget https://github.com/heimdal/heimdal/releases/download/heimdal-7.7.0/heimdal-7.7.0.tar.gz
+tar xvfz heimdal-7.7.0.tar.gz
+cd heimdal-7.7.0
+./configure --enable-otp=no --prefix=/opt/heimdal
+make
+make install
+
+ln -s /opt/heimdal/include /opt/heimdal/include/heimdal
+
+#Add Heimdal Libraries to Systemwide Setup (AS ROOT):
+echo "/opt/heimdal/lib" > /etc/ld.so.conf.d/heimdal.conf
+ldconfig
+
+#Build openvas-smb (AS GVM):
+cd /opt/gvm/src
+export PKG_CONFIG_PATH=/opt/gvm/lib/pkgconfig:/opt/heimdal/lib/pkgconfig
+cd openvas-smb-1.0.5
+mkdir build
+cd build
+cmake .. -DCMAKE_INSTALL_PREFIX=/opt/gvm
+make
+make install
+
+#Build scanner (AS GVM):
+nano /opt/gvm/src/openvas-7.0.1/CMakeLists.txt
+
+Comment and Replace Line:
+-------------------------------------------------
+#set (CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} ${COVERAGE_FLAGS}")
+set (CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -Werror -Wno-error=deprecated-declarations")
+-------------------------------------------------
+
+cd /opt/gvm/src
+export PKG_CONFIG_PATH=/opt/gvm/lib/pkgconfig
+cd openvas-7.0.1
+mkdir build
+cd build
+cmake .. -DCMAKE_INSTALL_PREFIX=/opt/gvm
+make
+make doc
+make install
+
+#Setup Redis (AS ROOT):
+cp /etc/redis.conf /etc/redis.conf.orig
+cp /opt/gvm/src/openvas-7.0.1/config/redis-openvas.conf /etc/redis.conf
+chown redis /etc/redis.conf
+
+Change File:
+nano /etc/redis.conf
+
+Find Line and Replace:
+unixsocket /var/run/redis/redis.sock
+unixsocketperm 770
+
+(AS GVM):
+echo "db_address=/var/run/redis/redis.sock" > /opt/gvm/etc/openvas/openvas.conf
+
+(AS ROOT):
+systemctl enable redis
+systemctl start redis
+
+#Disable Transparent Huge Pages (AS ROOT):
+nano /etc/systemd/system/disable-thp.service
+
+-------------------------------------------------
+[Unit]
+Description=Disable Transparent Huge Pages (THP)
+
+[Service]
+Type=simple
+ExecStart=/bin/sh -c "echo 'never' > /sys/kernel/mm/transparent_hugepage/enabled && echo 'never' > /sys/kernel/mm/transparent_hugepage/defrag"
+
+[Install]
+WantedBy=multi-user.target
+-------------------------------------------------
+
+systemctl daemon-reload
+systemctl start disable-thp
+systemctl enable disable-thp
+
+#Add GVM to The Redis Group (AS ROOT):
+usermod -aG redis gvm
+systemctl restart redis
+
+#Add These Lines to The sudoers (AS ROOT):
+visudo /etc/sudoers
+
+-------------------------------------------------
+Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin:/opt/gvm/sbin"
+
+#Allow the user running ospd-openvas, to launch openvas with root permissions
+gvm ALL = NOPASSWD: /opt/gvm/sbin/openvas
+gvm ALL = NOPASSWD: /opt/gvm/sbin/gsad
+-------------------------------------------------
+
+#Add System Tuning Bits (AS ROOT):
+echo "net.core.somaxconn = 1024" >> /etc/sysctl.conf
+echo "vm.overcommit_memory = 1" >> /etc/sysctl.conf
+sysctl -p
+ldconfig
+
+#Synchronize NVT Data (AS GVM):
+greenbone-nvt-sync
+find /opt/gvm/var/lib/openvas/plugins | wc -l
+
+#Update the vt info (AS GVM):
+openvas --update-vt-info
+
+#Build gvmd (AS ROOT):
+ln -s /usr/include /usr/include/postgresql
+
+(AS GVM):
+nano /opt/gvm/src/gvmd-9.0.1/CMakeLists.txt
+
+Comment and Replace Line:
+-------------------------------------------------
+#set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -D_BSD_SOURCE -D_ISOC99_SOURCE -D_SVID_SOURCE -D_DEFAULT_SOURCE -D_FILE_OFFSET_BITS=64")
+set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -lpq -D_BSD_SOURCE -D_ISOC99_SOURCE -D_SVID_SOURCE -D_DEFAULT_SOURCE -D_FILE_OFFSET_BITS=64")
+-------------------------------------------------
+
+cd /opt/gvm/src
+export PKG_CONFIG_PATH=/opt/gvm/lib/pkgconfig
+cd gvmd-9.0.1
+mkdir build
+cd build
+cmake .. -DCMAKE_INSTALL_PREFIX=/opt/gvm/ -DPostgreSQL_TYPE_INCLUDE_DIR=/usr/include/pgsql/server -DPostgreSQL_INCLUDE_DIR=/usr/include/pgsql/server -DPostgreSQL_LIBRARY=/usr/lib64/pgsql
+make
+make doc
+make install
+
+#Install Yarn for gsa (AS ROOT):
+npm install -g yarn
+
+#Build gsa (AS GVM):
+cd /opt/gvm/src
+export PKG_CONFIG_PATH=/opt/gvm/lib/pkgconfig
+cd gsa-9.0.1
+mkdir build
+cd build
+cmake .. -DCMAKE_INSTALL_PREFIX=/opt/gvm
+make
+make doc
+make install
+
+greenbone-scapdata-sync
+greenbone-certdata-sync
+gvm-manage-certs -a
+
+#Build OSPd and OSPd-Openvas (AS GVM):
+mkdir -p /opt/gvm/lib/python3.6/site-packages
+
+cd /opt/gvm/src
+export PYTHONPATH=/opt/gvm/lib/python3.6/site-packages
+export PKG_CONFIG_PATH=/opt/gvm/lib/pkgconfig
+cd ospd-2.0.1
+python3 setup.py install --prefix=/opt/gvm
+
+cd /opt/gvm/src
+export PYTHONPATH=/opt/gvm/lib/python3.6/site-packages
+export PKG_CONFIG_PATH=/opt/gvm/lib/pkgconfig
+cd ospd-openvas-1.0.1
+python3 setup.py install --prefix=/opt/gvm
+
+#Add Install Script (AS ROOT):
+nano /etc/systemd/system/ospd.service
+
+-------------------------------------------------
+[Unit]
+Description=Job that runs the ospd-openvas daemon
+Documentation=man:gvm
+After=postgresql.service
+
+[Service]
+Environment=PATH=/opt/gvm/bin/ospd-scanner/bin:/opt/gvm/bin:/opt/gvm/sbin:/opt/gvm/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PYTHONPATH=/opt/gvm/lib/python3.6/site-packages
+Type=simple
+User=gvm
+Group=gvm
+WorkingDirectory=/opt/gvm
+PIDFile=/opt/gvm/var/run/ospd-openvas.pid
+ExecStart=/usr/bin/python3 /opt/gvm/bin/ospd-openvas --pid-file /opt/gvm/var/run/ospd-openvas.pid --unix-socket /opt/gvm/var/run/ospd.sock --log-file /opt/gvm/var/log/gvm/ospd-openvas.log --lock-file-dir /opt/gvm/var/run
+
+[Install]
+WantedBy=multi-user.target
+-------------------------------------------------
+
+nano /etc/systemd/system/gvmd.service
+
+-------------------------------------------------
+[Unit]
+Description=Job that runs the gvm daemon
+Documentation=man:gvm
+After=ospd.service
+
+[Service]
+Type=forking
+User=gvm
+Group=gvm
+PIDFile=/opt/gvm/var/run/gvmd.pid
+WorkingDirectory=/opt/gvm
+ExecStartPre=/bin/sleep 60
+ExecStart=/opt/gvm/sbin/gvmd --osp-vt-update=/opt/gvm/var/run/ospd.sock
+
+[Install]
+WantedBy=multi-user.target
+-------------------------------------------------
+
+nano /etc/systemd/system/gsad.service
+
+-------------------------------------------------
+[Unit]
+Description=Job that runs the gsa daemon
+Documentation=man:gsa
+After=postgresql.service
+
+[Service]
+Type=forking
+PIDFile=/opt/gvm/var/run/gsad.pid
+WorkingDirectory=/opt/gvm
+ExecStart=/opt/gvm/sbin/gsad --listen=0.0.0.0
+[Install]
+WantedBy=multi-user.target
+-------------------------------------------------
+
+#For PDF Reports (AS ROOT):
+yum -y install texlive-collection-fontsrecommended texlive-collection-latexrecommended texlive-changepage texlive-titlesec
+mkdir -p /usr/share/texlive/texmf-local/tex/latex/comment
+cd /usr/share/texlive/texmf-local/tex/latex/comment
+wget http://mirrors.ctan.org/macros/latex/contrib/comment/comment.sty
+chmod 644 comment.sty
+texhash
+
+#Cron Job (AS ROOT):
+touch /etc/cron.allow
+rm /etc/cron.deny
+echo "gvm"  > /etc/cron.allow
+
+(AS GVM):
+crontab -e
+
+Add Lines:
+0 21 * * * /opt/gvm/bin/greenbone-nvt-sync
+0 22 * * * /opt/gvm/sbin/greenbone-certdata-sync
+0 23 * * * /opt/gvm/sbin/greenbone-scapdata-sync
+
+#Enable Services (AS ROOT):
+systemctl daemon-reload
+systemctl enable ospd
+systemctl enable gvmd
+systemctl enable gsad
+
+#Start Services (AS ROOT):
+systemctl start ospd
+systemctl start gvmd
+systemctl start gsad
+
+Check Logs from:
+ls /opt/gvm/var/log/gvm/
+cat /opt/gvm/var/log/gvm/gsad.log
+cat /opt/gvm/var/log/gvm/gvmd.log
+cat /opt/gvm/var/log/gvm/openvas.log
+cat /opt/gvm/var/log/gvm/ospd-openvas.log
+
+#Modify Default Scanner (AS GVM):
+gvmd --get-scanners
+gvmd --modify-scanner=08b69003-5fc2-4037-a479-93b440211c73 --scanner-host=/opt/gvm/var/run/ospd.sock
+gvmd --verify-scanner=08b69003-5fc2-4037-a479-93b440211c73
+
+#Create a User for UI (AS GVM):
+gvmd --create-user admin
+gvmd --user=admin --new-password=mypassword
+
+#Add Firewall Rule for https (AS ROOT):
+firewall-cmd --zone=public --permanent --add-service=https
+firewall-cmd --reload
+firewall-cmd --list-all
